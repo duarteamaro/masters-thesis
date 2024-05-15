@@ -1,0 +1,3430 @@
+---
+title: "Thesis Code"
+author: "Duarte Amaro"
+date: "2024-02-12"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = FALSE, results = FALSE)
+
+library(tidyverse)
+library(haven)
+library(marginaleffects)
+library(stargazer)
+library(lme4)
+library(e1071)
+library(ggpubr)
+library(knitr)
+library(redres)
+library(lmtest)
+library(sandwich)
+library(car)
+library(grid)
+library(broom)
+library(ggfortify)
+library(ggpmisc)
+library(easystats)
+library(estimatr)
+
+theme_set(theme_bw() + theme(panel.grid.minor = element_blank(),
+                             plot.title = element_text(
+                                  face = "italic"),
+                             legend.position = "bottom"))
+
+```
+
+## Hypothesised Relationship
+
+```{r}
+
+data.frame(x = seq(0, 10), 
+           low_volat = seq(0, 10)*(-0.112) + 1, 
+           high_volat = 1.05) |>
+  pivot_longer(cols = c(low_volat, high_volat),
+               names_to = "names",
+               values_to = "values") |>
+  ggplot(aes(x, values,
+                #ymin = conf.low,
+                #ymax = conf.high,
+                color = names,
+           fill = names)) +
+  geom_line() +
+  #geom_ribbon(alpha = 0.2, colour = NA) +
+  #geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(palette = "Dark2",
+                     name = "Early Volatility",
+                     labels = c("High", "Low")) +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "Early Volatility",
+                     labels = c("High", "Low")) +
+  scale_x_continuous(breaks = c(0)) +
+  scale_y_continuous(breaks = c(0),
+                     limits = c(-0.6, 1.2)) +
+  labs(x = "Early Salience", 
+       y = "Hypothesised Marginal Effect",
+       title = "Figure 1: Hypothesised Marginal Effect of \nPast Government Participation on EU Position") +
+  theme(legend.position = "bottom")
+
+```
+
+## Data Cleaning and Descriptive Statistics
+
+### CHES and CMP
+
+```{r}
+
+#### Cleaning CHES data ####
+
+ches_trend <- read_dta("1999-2019_CHES_dataset_means(v3).dta") |>
+  mutate(
+    countryname = case_when(
+    country == 1 ~ "Belgium", country == 2 ~ "Denmark",
+    country == 3 ~ "Germany", country == 4 ~ "Greece",
+    country == 5 ~ "Spain", country == 6 ~ "France",
+    country == 7 ~ "Ireland", country == 8 ~ "Italy",
+    country == 10 ~ "Netherlands", country == 11 ~ "United Kingdom",
+    country == 12 ~ "Portugal", country == 13 ~ "Austria",
+    country == 14 ~ "Finland", country == 16 ~ "Sweden",
+    country == 20 ~ "Bulgaria", country == 21 ~ "Czech Republic",
+    country == 22 ~ "Estonia", country == 23 ~ "Hungary",
+    country == 24 ~ "Latvia", country == 25 ~ "Lithuania",
+    country == 26 ~ "Poland", country == 27 ~ "Romania",
+    country == 28 ~ "Slovakia", country == 29 ~ "Slovenia",
+    country == 31 ~ "Croatia", country == 34 ~ "Turkey",
+    country == 35 ~ "Norway", country == 36 ~ "Switzerland",
+    country == 37 ~ "Malta", country == 38 ~ "Luxembourg",
+    country == 40 ~ "Cyprus", country == 45 ~ "Iceland",
+    .default = NA
+  )) |>
+  rename(year_ches = year,
+         ches_id = party_id,
+         party_abbrev = party) |>
+  dplyr::select(ches_id, cmp_id, 
+                countryname,
+                party_abbrev, family, 
+                year_ches, electionyear,
+                eu_position, eu_salience, 
+                eu_dissent, eu_blur, 
+                lrecon, galtan,
+                lrgen,
+                vote, seat, govt)
+
+ches_ukraine <- read_dta("CHES_Ukraine_Feb2024.dta")  |>
+  mutate(
+    countryname = case_when(
+      country == 1 ~ "Belgium", country == 2 ~ "Denmark",
+      country == 3 ~ "Germany", country == 4 ~ "Greece",
+      country == 5 ~ "Spain", country == 6 ~ "France",
+      country == 7 ~ "Ireland", country == 8 ~ "Italy",
+      country == 10 ~ "Netherlands", country == 11 ~ "United Kingdom",
+      country == 12 ~ "Portugal", country == 13 ~ "Austria",
+      country == 14 ~ "Finland", country == 16 ~ "Sweden",
+      country == 20 ~ "Bulgaria", country == 21 ~ "Czech Republic",
+      country == 22 ~ "Estonia", country == 23 ~ "Hungary",
+      country == 24 ~ "Latvia", country == 25 ~ "Lithuania",
+      country == 26 ~ "Poland", country == 27 ~ "Romania",
+      country == 28 ~ "Slovakia", country == 29 ~ "Slovenia",
+      country == 31 ~ "Croatia", country == 34 ~ "Turkey",
+      country == 35 ~ "Norway", country == 36 ~ "Switzerland",
+      country == 37 ~ "Malta", country == 38 ~ "Luxembourg",
+      country == 40 ~ "Cyprus", country == 45 ~ "Iceland",
+      .default = NA
+    )) |>
+  mutate(year_ches = 2023) |>
+  rename(ches_id = party_id,
+         party_abbrev = party) |>
+  dplyr::select(ches_id,
+                countryname,
+                party_abbrev, family, 
+                year_ches, electionyear,
+                eu_position,
+                lrecon, galtan,
+                vote, govt)
+
+ches <- bind_rows(ches_trend, ches_ukraine)
+
+#### Cleaning CMP data: ####
+
+cmp <- read_csv("MPDataset_MPDS2022a.csv")  |>
+  filter((countryname %in% unique(countryname[eumember == 10]) |
+           countryname == "Malta") &
+           pervote > 1) |>
+  mutate(
+    eu_position = (per108 - per110) / (per108 + per110),
+    log_eu = log(per108 + 0.5) - log(per110 + 0.5),
+    eu_salience = per108 + per110,
+    log_eu_salience = log((per108 + per110 + 1)),
+    Democratisation = case_when(
+      countryname %in% c("Portugal", "Spain",
+                         "Greece") ~ "1974 - 1989",
+      countryname %in% c("France", "Netherlands",
+                         "Germany", "Belgium",
+                         "Sweden", "Denmark",
+                         "Finland", "Luxembourg",
+                         "Austria", "United Kingdom", 
+                         "Italy", "Ireland") ~ "Pre-1974",
+      countryname %in% c("Poland", "Czech Republic", 
+                         "Bulgaria", "Croatia", 
+                         "Estonia", "Hungary", 
+                         "Latvia", "Lithuania", 
+                         "Romania", "Slovakia", 
+                         "Slovenia") ~ "1989 onwards") |>
+      as.factor() |>
+      relevel("1989 onwards"),
+    year = edate |>
+      str_replace_all('/', '-') |>
+      as.Date(format = "%d-%m-%Y"),
+    electionyear = year |> format("%Y") |> as.numeric()
+    ) |>
+  group_by(countryname) |>
+  mutate(year_1 = year[1],
+         yearLast = max(year)) |>
+  ungroup() |>
+  mutate(
+    time = as.duration(year - year_1) |>
+      as.numeric("years")
+  ) |>
+  rename(cmp_id = party)
+```
+
+### Volatility
+
+```{r}
+
+#### Volatility (Casal Bértoa)  ####
+
+volat0 <- readxl::read_excel("Electoral-volatility-2022.xlsx") |>
+  mutate(
+    countryname = case_when(country == "Czechia" ~ "Czech Republic",
+                            .default = str_remove_all(country, ' I$| II$| III$| IV$')),
+    year_exact = case_when(
+      countryname == "Bulgaria" & year == "2021A" ~ "2021-04-04",
+      countryname == "Bulgaria" & year == "2021J" ~ "2021-07-11",
+      countryname == "Bulgaria" & year == "2021N" ~ "2021-11-14",
+      countryname == "Denmark" & year == "1920A" ~ "1920-01-01",
+      countryname == "Denmark" & year == "1920J" ~ "1920-01-01",
+      countryname == "Denmark" & year == "1920S" ~ "1920-01-01",
+      countryname == "Denmark" & year == "1953A" ~ "1953-04-21",
+      countryname == "Denmark" & year == "1953S" ~ "1953-09-22",
+      countryname == "Germany" & year == "1924M" ~ "1924-01-01",
+      countryname == "Germany" & year == "1924D" ~ "1924-01-01",
+      countryname == "Germany" & year == "1932J" ~ "1932-01-01",
+      countryname == "Germany" & year == "1932N" ~ "1932-01-01",
+      countryname == "Greece" & year == "1989J" ~ "1989-06-18",
+      countryname == "Greece" & year == "1989N" ~ "1989-11-05",
+      countryname == "Greece" & year == "2012M" ~ "2012-05-06",
+      countryname == "Greece" & year == "2012J" ~ "2012-06-17",
+      countryname == "Greece" & year == "2015J" ~ "2015-01-25",
+      countryname == "Greece" & year == "2015S" ~ "2015-09-20",
+      countryname == "Iceland" &
+        year %in% c("1959J", "1959O") ~ "1959-01-01",
+      countryname == "Ireland" &
+        year %in% c("1927J", "1927S") ~ "1927-01-01",
+      countryname == "Ireland" & year == "1982F" ~ "1982-02-18",
+      countryname == "Ireland" & year == "1982N" ~ "1982-11-24",
+      countryname == "Liechtenstein" &
+        year %in% c("1993F", "1993O") ~ "1993-01-01",
+      countryname == "Moldova" & year == "2009A" ~ "2009-04-05",
+      countryname == "Moldova" & year == "2009J" ~ "2009-07-29",
+      countryname == "Spain" & year == "2019A" ~ "2019-04-28",
+      countryname == "Spain" & year == "2019N" ~ "2019-11-10",
+      countryname == "United Kingdom" &
+        year == "1974F" ~ "1974-02-28",
+      countryname == "United Kingdom" &
+        year == "1974O" ~ "1974-10-10",
+      .default = NA) |>
+      as.Date(),
+    electionyear = case_when(
+      is.na(year_exact) ~ year |> 
+        lubridate::ymd(truncated = 2L) |> 
+        format("%Y") |>
+        as.numeric(),
+      .default = NA)) |>
+  dplyr::select(countryname, electionyear, 
+                year_exact, tev) |>
+  rename(year = year_exact)
+
+## Getting detailed election dates (volatility data only includes year):
+
+volat <- bind_rows(volat0 |>
+  dplyr::select(countryname, electionyear, tev) |>
+  na.omit() |>
+  left_join(cmp |>
+              dplyr::select(electionyear, year, countryname), 
+            by = c("electionyear", "countryname")),
+  volat0 |>
+  dplyr::select(countryname, year, tev) |>
+  na.omit() |>
+  left_join(cmp |>
+              dplyr::select(electionyear, year, countryname), 
+            by = c("year", "countryname"))) |> 
+  distinct() |> 
+  na.omit()
+
+#### Volatility (Mainwaring)  ####
+
+mainwaring <- read_dta("Extra-WithinSystemVolatilityDataset(Mainwaring,Gervasoni,Espana-Najera2017).dta") |>
+  mutate(
+    countryname = case_when(
+      country == "UK" ~ "United Kingdom",
+      .default = str_to_title(country)
+    ),
+    electionyear = election_year,
+    es_volat = volatility - ws_volatility,
+    ws_volat = ws_volatility,
+    m_tev = volatility
+  ) |>
+  dplyr::select(countryname, electionyear,
+                m_tev, es_volat, 
+                ws_volat, new_p,
+                legperiod, elecper) |>
+  filter(countryname %in% unique(volat$countryname)) |>
+  mutate(
+    electionyear = case_when((countryname == "Spain" & electionyear == 2001) ~ 2000,
+    .default = electionyear) #   The 2000 elections in Spain were wrongly coded as taking place in 2001
+  )
+
+
+volat <- full_join(volat, mainwaring) |>
+  subset(!(countryname == "Denmark" & ((year == "1953-04-21" & elecper == 4) | 
+                                       (year == "1953-09-22" & elecper == 3)) |
+           countryname == "United Kingdom" & ((year == "1974-02-28" & elecper == 9) | 
+                                       (year == "1974-10-10" & elecper == 8)) |
+           countryname == "Ireland" & ((year == "1982-02-18" & elecper == 11) | 
+                                       (year == "1982-11-24" & elecper == 10)) |
+           countryname == "Greece" & ((year == "1989-06-18" & elecper == 5) | 
+                                       (year == "1989-11-05" & elecper == 4)))
+           ) |>
+  mutate(
+    year = case_when(
+      countryname == "Bulgaria" & electionyear == 1991 ~ unique(
+        cmp$year[cmp$countryname == "Bulgaria" & cmp$electionyear == 1991]),
+      countryname == "Czech Republic" & electionyear == 1992 ~ unique(
+        cmp$year[cmp$countryname == "Czech Republic" & cmp$electionyear == 1992]),
+      countryname == "France" & electionyear == 1958 ~ unique(
+        cmp$year[cmp$countryname == "France" & cmp$electionyear == 1958]),
+      countryname == "France" & electionyear == 1962 ~ unique(
+        cmp$year[cmp$countryname == "France" & cmp$electionyear == 1962]),
+      countryname == "France" & electionyear == 1967 ~ unique(
+        cmp$year[cmp$countryname == "France" & cmp$electionyear == 1967]),
+      countryname == "France" & electionyear == 1968 ~ unique(
+        cmp$year[cmp$countryname == "France" & cmp$electionyear == 1968]),
+      countryname == "Portugal" & electionyear == 1976 ~ unique(
+        cmp$year[cmp$countryname == "Portugal" & cmp$electionyear == 1976]),
+      countryname == "Romania" & electionyear == 1992 ~ unique(
+        cmp$year[cmp$countryname == "Romania" & cmp$electionyear == 1992]),
+      countryname == "Romania" & electionyear == 1996 ~ unique(
+        cmp$year[cmp$countryname == "Romania" & cmp$electionyear == 1996]),
+      countryname == "Spain" & electionyear == 1979 ~ unique(
+        cmp$year[cmp$countryname == "Spain" & cmp$electionyear == 1979]),
+      .default = year
+    )
+  )
+
+
+
+#### Party Institutionalization Data (Casal Bértoa) ####
+
+party_instit <- readxl::read_excel("Party-institutionalization-2022.xlsx") |>
+  mutate(
+    countryname = case_when(country == "Czechia" ~ "Czech Republic",
+                            .default = str_remove_all(country, ' I$| II$| III$| IV$')),
+    electionyear = year |> 
+        lubridate::ymd(truncated = 2L) |> 
+        format("%Y") |>
+        as.numeric()) |>
+  dplyr::select(countryname, electionyear, 
+                pi_z)
+
+#### Merging CMP & Volatility Data ####
+
+data0 <- left_join(cmp, 
+            volat, 
+            by = c("year", "electionyear", "countryname")) |>
+  left_join(party_instit,
+            by = c("electionyear", "countryname")) |>
+  filter(!(countryname %in% c("Malta", "Cyprus"))) |>
+  mutate(
+    ThirdWave = case_when(year_1 |> format("%Y") >= 1974 ~ 1,
+                          .default = 0)
+  ) |>
+  group_by(countryname) |>
+  mutate(
+    earlyVolat = median(tev[time <= 10 & time >= 0], na.rm = TRUE),
+    earlySalience = median(log_eu_salience[time <= 10 &
+                                             time >= 0], na.rm = TRUE),
+    earlySalience_linear = median(eu_salience[time <= 10 &
+                                             time >= 0], na.rm = TRUE),
+    earlypi_z = median(pi_z[time <= 10 & time >= 0], na.rm = TRUE),
+    earlyVolat_m = median(m_tev[time <= 10 & time >= 0], na.rm = TRUE),
+    earlyExtra = median(es_volat[time <= 10 & time >= 0], na.rm = TRUE),
+  ) |>
+  ungroup()
+
+```
+
+### Descriptive Statistics
+
+```{r}
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(cmp_id, countryname, 
+                    year, log_eu, log_eu_salience, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(cmp_id, countryname, 
+                    year, log_eu, log_eu_salience, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(cmp_id, countryname, 
+                  year, log_eu, log_eu_salience, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |>
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, log_eu_salience, 
+                               median, na.rm = TRUE), 
+                   y = log_eu_salience,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "Log EU Salience",
+       title = "Figure 2: Log EU salience",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(countryname, year, tev, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(countryname, year, tev, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(countryname, year, tev, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |> 
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, tev, 
+                               median, na.rm = TRUE), 
+                   y = tev,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "",
+       title = "Figure 3: Electoral Volatility",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+data0 |>
+  dplyr::select(earlySalience, earlyVolat,
+                countryname, Democratisation) |> 
+  distinct() |>
+  ggplot(aes(x = earlySalience, 
+             y = earlyVolat,
+             label = countryname,
+             colour = Democratisation)) +
+  geom_hline(aes(yintercept = mean(earlyVolat, na.rm = TRUE)),
+             linetype = "dashed",
+             alpha = 0.5) +
+  geom_vline(aes(xintercept = mean(earlySalience, na.rm = TRUE)),
+             linetype = "dashed",
+             alpha = 0.5) +
+  geom_text(size = 2.5) +
+  scale_color_brewer(palette = "Dark2") +
+  theme(panel.grid.major = element_blank()) +
+  labs(x = "Log EU Salience",
+       y = "Electoral Volatility",
+       title = "Figure 4: Median values per country",
+       subtitle = "First decade after democratisation")
+
+data_kable <- data0
+
+```
+
+
+```{r}
+
+#### Appendix Volatility ####
+
+v_test <- volat |>
+  dplyr::select(tev, m_tev) |>
+  na.omit()
+
+cor(v_test$tev, v_test$m_tev)
+
+volat |>
+  ggplot(aes(x = tev, y = m_tev)) +
+  geom_abline(intercept = 0, slope = 1,
+              linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = ifelse((m_tev > (1.3*tev + 12)) | 
+                                 (m_tev < (1.3*tev - 12)),
+                               paste(countryname, electionyear),
+                               "")),
+            size = 2.5) +
+  geom_smooth(method = "lm",
+              fill = "#1B9E77",
+              colour = "#1B9E77",
+              alpha = 0.1) +
+  stat_poly_eq(use_label(c("eq", "R2"))) +
+  labs(x = "Volatility (Casal Bértoa)",
+       y = "Volatility (Mainwaring et al)",
+       title = "Figure A2: Comparing Volatility Sources")
+
+volat |>
+  ggplot(aes(x = tev, y = es_volat)) +
+  #geom_abline(intercept = 0, slope = 1,
+  #            linetype = "dashed") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = ifelse((es_volat > (0.62*tev + 12)) | 
+                                 (es_volat < (0.62*tev - 12)),
+                               paste(countryname, electionyear),
+                               "")),
+            size = 2.5) +
+  geom_smooth(method = "lm",
+              fill = "#1B9E77",
+              colour = "#1B9E77",
+              alpha = 0.1) +
+  stat_poly_eq(use_label(c("eq", "R2"))) +
+  labs(x = "Total Volatility (Casal Bértoa)",
+       y = "Extra-System Volatiltiy (Mainwaring et al)",
+       title = "Figure A3: Comparing Total and Extra-System Volatility")
+
+#### Appendix Boxplot (early salience x early volat) ####
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(countryname, year, m_tev, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(countryname, year, m_tev, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(countryname, year, m_tev, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |> 
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, m_tev, 
+                               median, na.rm = TRUE), 
+                   y = m_tev,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "",
+       title = "Figure A4: Total Electoral Volatility (Mainwaring et al 2017)",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(countryname, year, es_volat, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(countryname, year, es_volat, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(countryname, year, es_volat, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |> 
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, es_volat, 
+                               median, na.rm = TRUE), 
+                   y = es_volat,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "",
+       title = "Figure A5: Extra-System Volatility (Mainwaring et al 2017)",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(countryname, year, pi_z, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(countryname, year, pi_z, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(countryname, year, pi_z, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |> 
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, pi_z, 
+                               median, na.rm = TRUE), 
+                   y = pi_z,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "",
+       title = "Figure A6: Party Institutionalisation (Casal Bértoa)",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+bind_rows(
+  bind_rows(
+    data0 |>
+      filter(time <= 5 & time >= 0) |>
+      dplyr::select(cmp_id, countryname, 
+                    year, eu_salience, Democratisation) |>
+      distinct() |>
+      mutate(diff = 5),
+    data0 |>
+      filter(time <= 10 & time >= 0) |>
+      dplyr::select(cmp_id, countryname, 
+                    year, eu_salience, Democratisation) |>
+      distinct() |>
+      mutate(diff = 10)),
+  data0 |>
+    filter(time <= 15 & time >= 0) |>
+    dplyr::select(cmp_id,
+                  countryname, year, eu_salience, Democratisation) |>
+    distinct() |>
+    mutate(diff = 15)) |> 
+  ggplot() +
+  geom_boxplot(aes(x = reorder(countryname, eu_salience, 
+                               median, na.rm = TRUE), 
+                   y = eu_salience,
+                   colour = Democratisation,
+                   fill = Democratisation,
+                   alpha = as.factor(diff))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7)) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2",
+                     name = "") +
+  scale_alpha_manual(values = c(0.2, 0.5, 0.7)) +
+  guides(alpha = "none", fill = "none") +
+  labs(x = "",
+       y = "",
+       title = "Figure A7: Linear EU Salience",
+       subtitle = "First 5, 10, and 15 years after democratisation")
+
+```
+
+### ParlGov, Eurostat, and Merging
+
+```{r}
+
+#### ParlGov ####
+
+parties <- read_csv("view_party.csv") |> 
+  dplyr::select(country_name_short, country_name,
+                party_name_short, party_name_english,
+                party_name, cmp, chess, party_id) |>
+  rename(cmp_id = cmp,
+         ches_id = chess,
+         parlgov_id = party_id)
+
+cabinets <- read_csv("view_cabinet.csv") |>
+  rename(parlgov_id = party_id) |>
+  mutate(end_date = NA |>
+  as.Date())
+
+
+for (i in unique(cabinets$cabinet_id)) {
+
+  cabinets$end_date[cabinets$cabinet_id == i] <- cabinets$start_date[
+    cabinets$previous_cabinet_id == i] |>
+    na.omit() |> 
+    as.Date()
+    
+}
+
+elections <- full_join(
+  full_join(read_csv("view_election.csv"),
+            read_csv("viewcalc_election_parameter.csv")),
+  read_csv("election_result.csv")) |>
+  rename(parlgov_id = party_id)
+
+parlgov <- full_join(full_join(elections, cabinets), parties) |>
+  filter(election_type == "parliament" &
+           country_name %in% data0$countryname) |>
+  mutate(cabinet_duration = time_length(end_date - start_date, "years")) |>
+  group_by(parlgov_id) |>
+  mutate(
+    past_govt = ifelse(is.na(cabinet_party) | cabinet_party == 0, 0, 1),
+    past_pm = ifelse(is.na(prime_minister) | prime_minister == 0, 0, 1),
+    govt_duration = ifelse(is.na(cabinet_party) |
+                             cabinet_party == 0, 0, cabinet_duration),
+    party_age = ifelse(is.na(vote_share) | vote_share == 0, 0, 1 )
+  ) |>
+  mutate(past_govt = cummax(past_govt),
+         past_pm = cummax(past_pm),
+         govt_duration = cumsum(as.numeric(govt_duration)),
+         party_age = cumsum(as.numeric(party_age)),
+         electionyear = as.numeric(format(election_date, "%Y"))) |>
+  ungroup() |>
+  rename(countryname = country_name,
+         year = election_date) |>
+  dplyr::select(countryname, year, electionyear,
+                party_name_short, 
+                party_name, party_name_english,
+                enp_votes, enp_seats, disproportionality, 
+                cabinet_party, prime_minister,
+                past_govt, past_pm, govt_duration,
+                party_age,
+                vote_share,
+                ches_id, cmp_id, parlgov_id
+                )
+
+data0 <- data0 |>
+  dplyr::select(countryname,
+                earlyVolat, earlySalience, earlypi_z,
+                earlyVolat_m, earlyExtra, earlySalience_linear,
+                Democratisation, ThirdWave) |>
+  distinct()
+
+
+## Merging CMP-Volatility with ParlGov:
+
+data0 <- full_join(data0, parlgov)
+
+## Merging CMP-Volatility-ParlGov with CHES:
+
+intersect(names(data0), names(ches))
+
+ches$electionyear[!(ches$electionyear %in% data0$electionyear)]
+ches$countryname[!(ches$countryname %in% data0$countryname)]
+
+## Joining by CHES identifier and checking for parties where the 
+##  CMP identifiers differ
+
+left_join(ches,
+          data0 |>
+            filter(!is.na(ches_id)) |>
+            rename(orig_cmp = cmp_id)) |>
+  filter(orig_cmp != cmp_id) |>
+  dplyr::select(
+    countryname,
+    ches_id,
+    cmp_id,
+    orig_cmp,
+    party_abbrev,
+    party_name_short,
+    party_name_english,
+    electionyear
+  ) |>
+  distinct() #|> View()
+  ## Where the CMP identifiers differ, the CHES identifier 
+  ##  indicates the same party.
+
+## Joining by CMP identifier and checking for parties where the 
+##  CHES identifiers differ
+left_join(ches,
+          data0 |>
+            filter(!is.na(cmp_id)) |>
+            rename(ches_id_pg = ches_id)) |>
+  filter(ches_id_pg != ches_id) |>
+  dplyr::select(
+    countryname,
+    cmp_id,
+    ches_id,
+    ches_id_pg,
+    party_abbrev,
+    party_name_short,
+    party_name_english,
+    electionyear
+  ) |>
+  distinct() #|> View()
+
+## The German CSU has the wrong CMP code but the right CHES code; 
+##  joining by CHES solves the issue.
+
+## Same for the Croatian HSP (CHES = 3018; CMP != 81713)
+
+## The Romanian PDL has the wrong CHES code (2701 instead of 2704) 
+##  but the right CMP code (93221):
+
+data0 <- data0 |>
+  mutate(
+    ches_id = case_when(
+      cmp_id == 93221 ~ 2704,
+      .default = ches_id
+    )
+  )
+
+## We are left with the parties for which either CHES or CMP codes 
+##  (or both) are lacking - mismatched parties in the trend files 
+##  and parties appearing only in the 2024 SPEED CHES.
+
+## Where we only have one, we can join the two datasets by the codes available 
+##  and visually confirm whether the parties are the same
+
+## When CMP is missing from data0:
+inner_join(ches,
+          data0 |>
+            filter(is.na(cmp_id)) |>
+            dplyr::select(-cmp_id)) |>
+  dplyr::select(
+    countryname,
+    ches_id,
+    party_abbrev,
+    party_name_short,
+    party_name_english,
+    electionyear
+  ) |>
+  distinct() #|> View()
+  ## Parties matched by CHES identifier are correct
+
+## When CHES is missing from data0:
+inner_join(ches,
+          data0 |>
+            filter(is.na(ches_id) & !is.na(cmp_id)) |>
+             dplyr::select(-ches_id)) |>
+  dplyr::select(
+    countryname,
+    cmp_id,
+    ches_id,
+    party_abbrev,
+    party_name_short,
+    party_name_english,
+    electionyear
+  ) |>
+  distinct() #|> View()
+  ## Parties lacking a CHES identifier but not a CMP one are correctly 
+  ##  matched by CMP identifier.
+
+## When CMP is missing from the CHES data:
+inner_join(ches |>
+             filter(is.na(cmp_id)) |>
+             dplyr::select(-cmp_id),
+          data0) |>
+  dplyr::select(
+    countryname,
+    cmp_id,
+    ches_id,
+    party_abbrev,
+    party_name_short,
+    party_name_english,
+    electionyear
+  ) |>
+  distinct() #|> View()
+  ## Parties lacking a CMP identifier are correctly 
+  ##  matched by their CHES identifier
+
+## There are no parties in the CHES dataset without a CHES identifier. 
+
+## The only remaining possibility is for a party to lack both identifiers in 
+##  the CMP-Volatility-ParlGov data.
+
+data0 |> 
+  filter(is.na(ches_id) & is.na(cmp_id) &
+           electionyear > min(ches$electionyear, 
+                              na.rm = TRUE)) |> #View()
+  nrow()
+  ## There are 704 observations
+
+join0 <- bind_rows(
+  inner_join(ches,
+             data0 |>
+               filter(!is.na(ches_id)) |>
+               rename(cmp_orig_id = cmp_id)),
+  inner_join(
+    ches,
+    data0 |>
+      filter(!is.na(cmp_id) & is.na(ches_id)) |>
+      dplyr::select(-ches_id)
+  )
+)
+
+join0 |> 
+  filter(is.na(ches_id)) |> 
+  nrow()
+  ## Each row in 'join0' has a CHES identifier.
+
+ches_unmatch <- ches |>
+  filter(!(ches_id %in% join0$ches_id))
+
+  ## There are 338 unmatched rows.
+
+## Joining some parties by their abbreviation.
+join0 <- bind_rows(join0,
+                   inner_join(
+                     ches_unmatch,
+                     data0 |>
+                       filter(
+                         is.na(ches_id) & is.na(cmp_id) &
+                           electionyear >= min(ches$electionyear,
+                                              na.rm = TRUE)
+                       ) |>
+                       rename(party_abbrev = party_name_short) |>
+                       dplyr::select(-c(cmp_id, ches_id))
+                   ))
+
+ches_unmatch <- ches |>
+  filter(!(ches_id %in% join0$ches_id))
+
+## There are now 218 unmatched rows
+
+#View(ches_unmatch)
+#View(data0 |> filter(electionyear >= min(ches_unmatch$electionyear, na.rm = TRUE)))
+
+data0 <- data0 |>
+  mutate(
+    ches_id = case_when(
+      countryname == "Austria" & 
+        electionyear == 2013 & 
+        party_name == "Team Stronach" ~ 1310,
+      countryname == "Belgium" & 
+        electionyear == 2014 & 
+        party_name == "Parti populaire" ~ 120,
+      countryname == "Bulgaria" &
+        electionyear == 2001 &
+        party_name == "Dvizhenie Gergyovden" ~ 2005,
+      countryname == "Bulgaria" &
+        electionyear == 2014 &
+        party_name == "Balgarija bes Zensura" ~ 2015,
+      countryname == "Bulgaria" &
+        electionyear == 2017 &
+        party_name == "Da Bulgaria!" ~ 2018,
+      countryname == "Bulgaria" &
+        electionyear == 2023 &
+        party_name == "Vazrazhdane" ~ 2020,
+      countryname == "Croatia" &
+        electionyear == 2011 &
+        party_name == "Hrvatski laburisti – Stranka rada" ~ 3112,
+      countryname == "Croatia" &
+        electionyear == 2016 &
+        party_name == "Živi zid" ~ 3116,
+      countryname == "Croatia" &
+        electionyear == 2016 &
+        party_name == "Milan Bandić 365 – Stranka rada i solidarnosti" ~ 3117,
+      countryname == "Croatia" &
+        electionyear == 2020 &
+        party_name == "Živi zid" ~ 3116,
+      countryname == "Croatia" &
+        electionyear == 2020 &
+        party_name == "Domovinski pokret" ~ 3122,
+      countryname == "Croatia" &
+        electionyear == 2020 &
+        party_name == "Pametno" ~ 3121,
+      countryname == "Cyprus" &
+        electionyear == 2011 &
+        party_name == "Kinima Sosialdimokraton EDEK" ~ 4005,
+      countryname == "Cyprus" &
+        electionyear == 2011 &
+        party_name == "Evropaiko Komma" ~ 4002,
+      countryname == "Cyprus" &
+        electionyear == 2016 &
+        party_name == "Kinima Sosialdimokraton EDEK" ~ 4005,
+      countryname == "Czech Republic" &
+        electionyear == 2017 &
+        party_name == "Ceska piratska strana" ~ 2114,
+      countryname == "Czech Republic" &
+        electionyear == 2021 &
+        party_name == "Přísaha" ~ 2117,
+      countryname == "Denmark" &
+        electionyear == 2022 &
+        party_name == "Danmarksdemokraterne" ~ 222,
+      countryname == "Estonia" &
+        electionyear == 2019 &
+        party_name == "Eestimaa Rahvalliit / Eesti Konservatiivne Rahvaerakond" ~ 2209,
+      countryname == "Estonia" &
+        electionyear == 2023 &
+        party_name == "Eestimaa Rahvalliit / Eesti Konservatiivne Rahvaerakond" ~ 2209,
+      countryname == "France" &
+        electionyear == 2012 &
+        party_name == "Parti radical de gauche" ~ 622,
+      countryname == "France" &
+        electionyear == 2017 &
+        party_name == "La République En Marche! | Renaissance" ~ 626,
+      countryname == "France" &
+        electionyear == 2017 &
+        party_name == "Debout la république | Debout la France" ~ 628,
+      countryname == "France" &
+        electionyear == 2022 &
+        party_name == "La République En Marche! | Renaissance" ~ 626,
+      countryname == "Germany" &
+        electionyear == 2013 &
+        party_name == "Piratenpartei Deutschland" ~ 311,
+      countryname == "Greece" &
+        electionyear == 2012 &
+        party_name == "Laikos Syndesmos – Chrysi Avg" ~ 415,
+      countryname == "Greece" &
+        electionyear == 2019 &
+        party_name == "Métopo Evropaikís Realistikís Anypakoís" ~ 417,
+      countryname == "Greece" &
+        electionyear == 2019 &
+        party_name == "Laikos Syndesmos – Chrysi Avg" ~ 415,
+      countryname == "Greece" &
+        electionyear == 2023 &
+        party_name == "Métopo Evropaikís Realistikís Anypakoís" ~ 417,
+      countryname == "Greece" &
+        electionyear == 2023 &
+        party_name == "Laikos Syndesmos – Chrysi Avg" ~ 415,
+      countryname == "Ireland" &
+        electionyear == 2016 &
+        party_name == "Independents 4 Change" ~ 711,
+      countryname == "Ireland" &
+        electionyear == 2020 &
+        party_name == "Independents 4 Change" ~ 711,
+      countryname == "Latvia" &
+        electionyear == 2014 &
+        party_name == "No sirds Latvijai" ~ 2413,
+      countryname == "Latvia" &
+        electionyear == 2014 &
+        party_name == "Latvijas Reģionu apvienība" ~ 2414,
+      countryname == "Latvia" &
+        electionyear == 2018 &
+        party_name == "Latvijas Reģionu apvienība" ~ 2414,
+      countryname == "Latvia" &
+        electionyear == 2018 &
+        party_name == "Kam pieder valsts?" ~ 2415,
+      countryname == "Latvia" &
+        electionyear == 2022 &
+        party_name == "Progresīvie" ~ 2420,
+      countryname == "Latvia" &
+        electionyear == 2022 &
+        party_name == "Katram un katrai" ~ 2421,
+      countryname == "Lithuania" &
+        electionyear == 2000 &
+        party_name == "Krikščionių demokratų sąjunga" ~ 2514,
+      countryname == "Lithuania" &
+        electionyear == 2020 &
+        party_name == "Laisvės partija" ~ 2524,
+      countryname == "Luxembourg" &
+        electionyear == 2018 &
+        party_name == "Piratepartei Lëtzebuerg" ~ 3807,
+      countryname == "Netherlands" &
+        electionyear == 1998 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2002 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2010 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2012 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2017 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2021 &
+        party_name == "Staatkundig Gereformeerde Partij" ~ 1006,
+      countryname == "Netherlands" &
+        electionyear == 2012 &
+        party_name == "50PLUS" ~ 1020,
+      countryname == "Netherlands" &
+        electionyear == 2017 &
+        party_name == "50PLUS" ~ 1020,
+      countryname == "Netherlands" &
+        electionyear == 2021 &
+        party_name == "50PLUS" ~ 1020,
+      countryname == "Netherlands" &
+        electionyear == 2021 &
+        party_name == "Volt Nederland" ~ 1052,
+      countryname == "Poland" &
+        electionyear == 2011 &
+        party_name == "Unia Polityki Realnej | Kongres Nowej Prawicy" ~ 2614,
+      countryname == "Poland" &
+        electionyear == 2019 &
+        party_name == "Wiosna" ~ 2621,
+      countryname == "Poland" &
+        electionyear == 2019 &
+        party_name == "Lewica Razem" ~ 2620,
+      countryname == "Poland" &
+        electionyear == 2019 &
+        party_name == "Kukiz'15" ~ 2617,
+      countryname == "Portugal" &
+        electionyear == 2019 &
+        party_name == "Partido Comunista Português" ~ 1210,
+      countryname == "Portugal" &
+        electionyear == 2022 &
+        party_name == "Partido Comunista Português" ~ 1210,
+      countryname == "Portugal" &
+        electionyear == 2022 &
+        party_name == "Chega" ~ 1253,
+      countryname == "Romania" &
+        electionyear == 2000 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2004 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2008 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2012 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2016 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2016 &
+        party_name == "Uniunea Salvați România | Partidul Libertate, Unitate și Solidaritate" ~ 2713,
+      countryname == "Romania" &
+        electionyear == 2016 &
+        party_name == "Partidul Liberal Reformator | Alianța Liberalilor și Democraților" ~ 2712,
+      countryname == "Romania" &
+        electionyear == 2020 &
+        party_name == "Partidul Social Democrat" ~ 2701,
+      countryname == "Romania" &
+        electionyear == 2020 &
+        party_name == "Uniunea Salvați România | Partidul Libertate, Unitate și Solidaritate" ~ 2713,
+      countryname == "Romania" &
+        electionyear == 2016 &
+        party_name == "PRO România" ~ 2714,
+      countryname == "Slovakia" &
+        electionyear == 2016 &
+        party_name == "Ľudová strana Naše Slovensko" ~ 2817,
+      countryname == "Slovakia" &
+        electionyear == 2016 &
+        party_name == "Sme Rodina – Boris Kollár" ~ 2818,
+      countryname == "Slovakia" &
+        electionyear == 2016 &
+        party_name == "Sieť" ~ 2816,
+      countryname == "Slovakia" &
+        electionyear == 2020 &
+        party_name == "Ľudová strana Naše Slovensko" ~ 2817,
+      countryname == "Slovakia" &
+        electionyear == 2020 &
+        party_name == "Sme Rodina – Boris Kollár" ~ 2818,
+      countryname == "Slovakia" &
+        electionyear == 2020 &
+        party_name == "Za ľudí" ~ 2821,
+      countryname == "Slovenia" &
+        electionyear == 2014 &
+        party_name == "Združena levica" ~ 2912,
+      countryname == "Slovenia" &
+        electionyear == 2014 &
+        party_name == "Lista Zorana Jankovića – Pozitivna Slovenija" ~ 2914,
+      countryname == "Slovenia" &
+        electionyear == 2018 &
+        party_name == "Levica" ~ 2912,
+      countryname == "Slovenia" &
+        electionyear == 2022 &
+        party_name == "Levica" ~ 2912,
+      countryname == "Spain" &
+        electionyear == 2019 &
+        party_name == "Podemos" ~ 525,
+      countryname == "Sweden" &
+        electionyear == 2014 &
+        party_name == "Feministiskt initiativ" ~ 1612,
+      countryname == "United Kingdom" &
+        electionyear == 2019 &
+        party_name == "Sinn Féin" ~ 1113,
+      countryname == "United Kingdom" &
+        electionyear == 2019 &
+        party_name == "Democratic Unionist Party" ~ 1115,
+      countryname == "United Kingdom" &
+        electionyear == 2019 &
+        party_name == "Alliance Party of Northern Ireland" ~ 1112,
+      countryname == "United Kingdom" &
+        electionyear == 2019 &
+        party_name == "Brexit Party" ~ 1110,
+      .default = ches_id
+    )
+  )
+
+join0 <- bind_rows(join0,
+                   inner_join(
+                     ches_unmatch,
+                     data0))
+
+ches_unmatch <- ches |>
+  filter(!(ches_id %in% join0$ches_id))
+
+nrow(ches_unmatch)
+  ## There are 159 rows in the CHES data without a match in the 
+  ##  joint data.
+
+#### EUROSTAT ####
+
+gdp_colnames <- c("countryname", seq(1975, 2023))
+
+gdp_pc <- readxl::read_xlsx("nama_10_pc_page_spreadsheet.xlsx",
+                            sheet = 3) |>
+  slice(c(10:48)) |>
+  select_if(~ !any(is.na(.))) |>
+  setNames(gdp_colnames) |>
+  mutate(across(gdp_colnames[2:50], 
+                ~ifelse(.==":", NA, as.numeric(.)))) |>
+  mutate(
+    countryname = case_when(
+      countryname == "Czechia" ~ "Czech Republic",
+      .default = countryname
+    )) |>
+  filter(countryname %in% join0$countryname) |>
+  pivot_longer(cols = gdp_colnames[2:50],
+               names_to = "electionyear",
+               values_to = "GDP_pc")
+
+pop_colnames <- c("countryname", seq(1960, 2023)) 
+
+pop <- readxl::read_xlsx("demo_pjan_page_spreadsheet.xlsx",
+                            sheet = 3) |> 
+  slice(c(11:59)) |>
+  select_if(~ !any(is.na(.))) |>
+  setNames(pop_colnames) |>
+  mutate(across(pop_colnames[2:length(pop_colnames)], 
+                ~ifelse(.==":", NA, as.numeric(.)))) |>
+  mutate(
+    countryname = case_when(
+      countryname == "Czechia" ~ "Czech Republic",
+      .default = countryname
+    )) |>
+  filter(countryname %in% join0$countryname) |>
+  pivot_longer(cols = pop_colnames[2:length(pop_colnames)],
+               names_to = "electionyear",
+               values_to = "population")
+
+nx_colnames <- c("countryname", seq(1975, 2022))
+
+exports <- readxl::read_xlsx("nama_10_exi_page_spreadsheet (1).xlsx",
+                            sheet = 3) |>
+  slice(c(10:43)) |>
+  select_if(~ !any(is.na(.))) |>
+  setNames(nx_colnames) |>
+  mutate(across(nx_colnames[2:length(nx_colnames)], 
+                ~ifelse(.==":", NA, as.numeric(.)))) |>
+  mutate(
+    countryname = case_when(
+      countryname == "Czechia" ~ "Czech Republic",
+      .default = countryname
+    )) |>
+  filter(countryname %in% join0$countryname) |>
+  pivot_longer(cols = nx_colnames[2:length(nx_colnames)],
+               names_to = "electionyear",
+               values_to = "exports")
+
+imports <- readxl::read_xlsx("nama_10_exi_page_spreadsheet (2).xlsx",
+                            sheet = 3) |>
+  slice(c(10:43)) |>
+  select_if(~ !any(is.na(.))) |>
+  setNames(nx_colnames) |>
+  mutate(across(nx_colnames[2:length(nx_colnames)], 
+                ~ifelse(.==":", NA, as.numeric(.)))) |>
+  mutate(
+    countryname = case_when(
+      countryname == "Czechia" ~ "Czech Republic",
+      .default = countryname
+    )) |>
+  filter(countryname %in% join0$countryname) |>
+  pivot_longer(cols = nx_colnames[2:length(nx_colnames)],
+               names_to = "electionyear",
+               values_to = "imports")
+
+eurostat <- full_join(
+  full_join(
+    full_join(gdp_pc,
+      pop),
+    exports),
+  imports) |> 
+  mutate(
+    electionyear = as.numeric(electionyear),
+    net_exports = exports - imports
+  ) |>
+  filter(electionyear >= min(join0$electionyear))
+
+#### Merging ####
+
+data <- left_join(join0, eurostat
+                  ) |>
+  mutate(
+    lr_squared = lrecon^2,
+    Year = as.character(electionyear),
+    Family = as.factor(family),
+    log_gdp = log(GDP_pc),
+    log_pop = log(population),
+  ) |>
+  group_by(ches_id) |>
+  mutate(
+      lag_vote = lag(vote),
+      delta_vote = vote - lag_vote,
+      lag_salience = lag(eu_salience),
+      lag_position = lag(eu_position)
+    ) |>
+  ungroup()
+
+```
+
+### Appendix Descriptives
+
+#### Tables and Variable Distributions
+
+```{r, results = TRUE}
+#### Table A1 ####
+
+get_stats <- function(x){
+  c(N = sum(complete.cases(x)),
+    Min = round(min(as.numeric(x), na.rm = TRUE), digits = 2),
+    Max = round(max(as.numeric(x), na.rm = TRUE), digits = 2),
+    Mean = round(mean(as.numeric(x), na.rm = TRUE), digits = 2),
+    Median = round(median(as.numeric(x), na.rm = TRUE), digits = 2),
+    SD = round(sd(as.numeric(x), na.rm = TRUE), digits = 2),
+    Skewness = round(skewness(as.numeric(x), na.rm = TRUE), digits = 2)
+    )
+}
+
+tableA1 <- data.frame(bind_cols(
+  "Variable" = colnames(data |>
+                          dplyr::select(
+                            c(
+                              earlySalience,
+                              earlyVolat,
+                              earlyVolat_m,
+                              earlyExtra,
+                              earlypi_z,
+                              eu_position,
+                              lrecon,
+                              galtan,
+                              vote,
+                              seat,
+                              enp_seats,
+                              enp_votes,
+                              log_gdp,
+                              log_pop,
+                              net_exports,
+                              past_govt,
+                              govt_duration
+                            )
+                          )),
+  data |>
+    dplyr::select(
+      c(
+        earlySalience,
+        earlyVolat,
+        earlyVolat_m,
+        earlyExtra,
+        earlypi_z,
+        eu_position,
+        lrecon,
+        galtan,
+        vote,
+        seat,
+        enp_seats,
+        enp_votes,
+        log_gdp,
+        log_pop,
+        net_exports,
+        past_govt,
+        govt_duration
+      )
+    ) |>
+    map_df(get_stats)
+))
+
+stargazer(tableA1, 
+          type = "html",
+          out = "TableA1.html",
+          title = "Table A1: Descriptive Statistics",
+          summary = F,
+          rownames = F)
+
+#### TABLE A2 ####
+
+tableA2 <- cmp |> 
+  filter(time <= 10 & 
+           !(countryname %in% c("Malta", "Cyprus"))) |> 
+  dplyr::select(countryname, year) |> 
+  distinct() |>
+  mutate(year = as.character(year)) |>
+  rename(Country = countryname,
+         `Election Year` = year) |>
+  arrange(`Country`)
+
+stargazer(tableA2, 
+          type = "html",
+          out = "TableA2.html",
+          title = "Table A2: Election dates per country",
+          summary = F,
+          rownames = F)
+
+election_count <- cmp |> 
+  filter(time <= 10 & 
+           !(countryname %in% c("Malta", "Cyprus"))) |> 
+  dplyr::select(countryname, year) |> 
+  distinct() |> 
+  group_by(countryname) |> 
+  count()
+
+summary(election_count$n, na.rm = TRUE)
+
+#### TABLE A3 ####
+
+tableA3 <- parlgov |>
+  filter(past_govt == 1) |>
+  group_by(parlgov_id) |>
+  mutate(
+    firstyear = min(electionyear, na.rm = TRUE),
+    lastyear = max(electionyear, na.rm = TRUE),
+  ) |>
+  ungroup() |>
+  filter(lastyear >= 1996) |>
+  dplyr::select(countryname, party_name_short, party_name, firstyear) |>
+  distinct() |> 
+  rename(Country = countryname,
+         `Party Abbreviation` = party_name_short,
+         `Party Name` = party_name,
+         `First coded as Dominant` = firstyear) |>
+  mutate(
+    `Party Name` = janitor::make_clean_names(`Party Name`,
+                                             sep_out = " ",
+                                             case = "title")
+  )
+
+stargazer(tableA3, 
+          type = "html",
+          out = "TableA3.html",
+          title = "Table A3: Parties Coded as Dominant",
+          summary = F,
+          rownames = F)
+
+#### TABLE A4 ####
+
+tableA4 <- parlgov |>
+  group_by(countryname) |>
+  mutate(abslastyear = max(electionyear, na.rm = TRUE)) |>
+  filter(past_govt == 0 &
+           !(party_name %in% c("one-seat", "one seat", 
+                               "others", "no seat")) &
+           !(party_name_short %in% c("etc", "none", "ethnic"))) |>
+  group_by(parlgov_id) |>
+  mutate(
+    firstyear = min(electionyear, na.rm = TRUE),
+    lastyear = max(electionyear, na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  filter(lastyear >= 1996) |>
+  mutate(
+    firstyear = as.factor(firstyear),
+    lastyear = as.factor(lastyear),
+    lastyear = case_when(
+      lastyear == abslastyear ~ "Present",
+      .default = lastyear
+    ),
+    finaldate = case_when(
+      parlgov_id %in% parlgov$parlgov_id[parlgov$past_govt == 1] ~ lastyear,
+      .default = "Present"
+    ),
+    daterange = ifelse(firstyear == lastyear, 
+                       firstyear |> as.character(), 
+                       paste(firstyear, lastyear, sep = " - "))
+  ) |>
+  dplyr::select(countryname, party_name_short, party_name, #finaldate,
+                daterange) |>
+  distinct() |> 
+  rename(Country = countryname,
+         `Party Abbreviation` = party_name_short,
+         `Party Name` = party_name,
+         `Period in Sample` = daterange) |> 
+  mutate(
+    `Party Name` = janitor::make_clean_names(`Party Name`,
+                                             sep_out = " ",
+                                             case = "title")
+  )
+
+stargazer(tableA4, 
+          type = "html",
+          out = "TableA4.html",
+          title = "Table A4: Parties Coded as Challenger",
+          summary = F,
+          rownames = F)
+
+#### Variable distributions ####
+
+data |>
+  dplyr::select(
+    c(ches_id,
+      eu_position,
+      lrecon,
+      galtan,
+      vote,
+      seat,
+      enp_seats,
+      enp_votes,
+      log_gdp,
+      log_pop,
+      net_exports,
+      past_govt,
+      govt_duration
+    )
+  ) |>
+  pivot_longer(cols = -ches_id,
+               values_to = "values",
+               names_to = "names") |>
+  ggplot(aes(x = values)) +
+  geom_histogram() +
+  facet_wrap(~ names, scales = "free") +
+  labs(x = "",
+       title = "Figure A1: Variable Distributions")
+
+```
+
+```{r}
+
+#### Figure 5 ####
+
+data |>
+  group_by(countryname) |>
+  mutate(med_dom = median(eu_position[past_govt == 1], na.rm = TRUE),
+         med_chal = median(eu_position[past_govt == 0], na.rm = TRUE),
+         gap = (med_dom - med_chal)
+         ) |>
+  ungroup() |>
+  ggplot(aes(
+    x = reorder(countryname,
+                gap,
+                na.rm = TRUE),
+    y = eu_position,
+    colour = Democratisation,
+    fill = Democratisation,
+    alpha = as.factor(past_govt),
+  )) +
+  geom_boxplot() +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_alpha_manual(values = c(0.2, 0.7),
+                     name = "",
+                     labels = c("Dominant", "Challenger")) +
+  guides(fill = "none", alpha = "none") +
+  labs(x = "",
+       y = "EU Position",
+       title = "Figure 5: Dominant and Challenger Parties' EU Position (CHES)",
+       subtitle = "Dominant parties represented in the darker shade") +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    hjust = 1,
+    size = 7
+  ))
+
+```
+
+
+```{r}
+
+#### Figure A8 ####
+
+data |>
+  ggplot(aes(x = reorder(countryname, 
+                         eu_position, 
+                         na.rm = TRUE), 
+             y = eu_position,
+             colour = Democratisation,
+             fill = Democratisation)) +
+  geom_boxplot(alpha = 0.5) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  guides(fill = "none") +
+  labs(x = "",
+       y = "EU Position",
+       title = "Figure A8: Parties' EU Position (CHES) per country"
+       ) +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    hjust = 1,
+    size = 7
+  ))
+
+```
+
+
+## Models
+
+```{r}
+
+## Stargazer does not accept objects of class 'lm_robust' as input. 
+## The work-around is simply to create a normal 'lm' object and adjust
+## the standard errors with the 'starprep' function. This is what I do 
+## here.
+
+M1 <- lm(eu_position ~ past_govt +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+M2 <- lm(eu_position ~ past_govt*earlySalience +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+M3 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+M4 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+M5 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop +
+           Year + Family,
+           data = data)
+
+M6 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports +
+           Year + Family,
+           data = data)
+
+M7 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt +
+           Year + Family,
+           data = data)
+
+M8 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(M1, M2, M3, M4, M5, M6, M7, M8,
+          se = estimatr::starprep(M1, M2, M3, M4, M5, M6, M7, M8),
+          type = "text",
+          title = "Table 1: OLS Regression",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "Table1.html"
+          )
+```
+
+
+```{r}
+
+R8 <- lm_robust(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+k_lwr <- mean(data$earlyVolat, na.rm = TRUE) - sd(data$earlyVolat, na.rm = TRUE)
+k_upr <- mean(data$earlyVolat, na.rm = TRUE) + sd(data$earlyVolat, na.rm = TRUE)
+
+c_lwr <- mean(data$earlySalience, na.rm = TRUE) - sd(data$earlySalience, na.rm = TRUE)
+c_upr <- mean(data$earlySalience, na.rm = TRUE) + sd(data$earlySalience, na.rm = TRUE)
+
+plot_slopes(R8, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "Marginal Effect",
+       title = "Figure 6: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = M8") +
+  theme(legend.position = "bottom")
+
+plot_predictions(R8, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure 7: Predicted EU Position",
+       subtitle = "Model = M8",
+       y = "") +
+  theme(legend.position = "bottom")
+
+```
+
+## Appendix
+### MLM (country and family random intercepts)
+
+```{r, results = TRUE}
+
+MLM1 <- lmer(eu_position ~ past_govt +
+               lrecon + lr_squared + 
+               vote + enp_votes + log_gdp +
+               Year + (1 | countryname) + 
+               (1|Family),
+           data = data)
+
+MLM2 <- lmer(eu_position ~ past_govt*earlySalience +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + (1 | countryname) + 
+             (1|Family),
+           data = data)
+
+MLM3 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+MLM4 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+MLM5 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+MLM6 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+MLM7 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports + govt +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+MLM8 <- lmer(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + (1 | countryname) + (1|Family),
+           data = data)
+
+stargazer(MLM1, MLM2, MLM3, MLM4, MLM5, MLM6, MLM7, MLM8,
+          type = "html",
+          title = "Table A5: Multilevel Model",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Year"),
+          omit.labels = c("Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA5.html"
+          )
+
+```
+
+```{r}
+
+plot_slopes(MLM8, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "Marginal Effect",
+       title = "Figure A9: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = MLM8") +
+  theme(legend.position = "bottom")
+
+plot_predictions(MLM8, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A10: Predicted EU Position",
+       subtitle = "Model = MLM8",
+       y = "") +
+  theme(legend.position = "bottom")
+
+```
+
+### Country-clustered SEs
+
+```{r, results = TRUE}
+
+C1 <- coeftest(M1, 
+               vcov = vcovCL(M1, cluster = ~countryname))
+
+C2 <- coeftest(M2, 
+               vcov = vcovCL(M2, cluster = ~countryname))
+
+C3 <- coeftest(M3, 
+               vcov = vcovCL(M3, cluster = ~countryname))
+
+C4 <- coeftest(M4, 
+               vcov = vcovCL(M4, cluster = ~countryname))
+
+C5 <- coeftest(M5, 
+               vcov = vcovCL(M5, cluster = ~countryname))
+
+C6 <- coeftest(M6, 
+               vcov = vcovCL(M6, cluster = ~countryname))
+
+C7 <- coeftest(M7, 
+               vcov = vcovCL(M7, cluster = ~countryname))
+
+C8 <- coeftest(M8, 
+               vcov = vcovCL(M8, cluster = ~countryname))
+
+stargazer(C1, C2, C3, C4, C5, C6, C7, C8,
+          type = "html",
+          title = "Table A6: Country-clustered Standard Errors",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.1, 0.05, 0.01, 0.001),
+          star.char = c("+", "*", "**", "***"),
+          omit = c("Year", "Family"),
+          omit.labels = c("Year", "Family"),
+          omit.stat = c("f", "ser"),
+          out = "TableA6.html"
+          )
+
+```
+
+```{r}
+
+plot_slopes(M8, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            vcov = vcovCL(M8, cluster = ~ countryname),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "Marginal Effect",
+       title = "Figure A11: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = C8") +
+  theme(legend.position = "bottom")
+
+plot_predictions(M8, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 vcov = vcovCL(M8, cluster = ~ countryname),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A12: Predicted EU Position",
+       subtitle = "Model = C8",
+       y = "") +
+  theme(legend.position = "bottom")
+
+```
+
+### Robustness Checks (OLS with alternative variables)
+
+```{r, results = TRUE}
+
+#### Table A5 (robustness check w Mainwaring data) ####
+
+A1 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A2 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A3 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop +
+           Year + Family,
+           data = data)
+
+A4 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports +
+           Year + Family,
+           data = data)
+
+A5 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt +
+           Year + Family,
+           data = data)
+
+A6 <- lm(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A1, A2, A3, A4, A5, A6,
+          se = estimatr::starprep(A1, A2, A3, A4, A5, A6),
+          type = "html",
+          title = "Table A7: Robustness Check with Mainwaring et al (2017) data",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA7.html"
+          )
+
+#### Table A6 (robustness check w extra-system volatility) ####
+
+A7 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A8 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A9 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop +
+           Year + Family,
+           data = data)
+
+A10 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports +
+           Year + Family,
+           data = data)
+
+A11 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt +
+           Year + Family,
+           data = data)
+
+A12 <- lm(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A7, A8, A9, A10, A11, A12,
+          se = estimatr::starprep(A7, A8, A9, A10, A11, A12),
+          type = "html",
+          title = "Table A8: Robustness check with extra-system volatility",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Extra-System Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA8.html"
+          )
+
+#### Table A7 (robustness check with PI_Z) ####
+
+A13 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A14 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A15 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop +
+           Year + Family,
+           data = data)
+
+A16 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports +
+           Year + Family,
+           data = data)
+
+A17 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports + govt +
+           Year + Family,
+           data = data)
+
+A18 <- lm(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A13, A14, A15, A16, A17, A18,
+          se = estimatr::starprep(A13, A14, A15, A16, A17, A18),
+          type = "html",
+          title = "Table A9: Robustness check with PI index",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience",
+                               "Early Party Institutionalisation",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early PI",
+                               "Early Salience:Early PI",
+                               "Past Govt:Early Salience:Early PI"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA9.html"
+          )
+
+A19 <- lm(eu_position ~ past_govt*earlySalience_linear +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A20 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A21 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A22 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop +
+           Year + Family,
+           data = data)
+
+A23 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports +
+           Year + Family,
+           data = data)
+
+A24 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt +
+           Year + Family,
+           data = data)
+
+A25 <- lm(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A19, A20, A21, A22, A23, A24, A25,
+          se = estimatr::starprep(A19, A20, A21, A22, A23, A24, A25),
+          type = "html",
+          title = "Table A10: Robustness check with linear early EU salience",
+          dep.var.caption  = "CHES EU Position",
+          covariate.labels = c("Past Govt Participation",
+                               "Early Salience (Linear)",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA10.html"
+          )
+
+```
+
+
+```{r}
+
+k2_lwr <- mean(data$earlyVolat_m, na.rm = TRUE) - sd(data$earlyVolat_m, na.rm = TRUE)
+k2_upr <- mean(data$earlyVolat_m, na.rm = TRUE) + sd(data$earlyVolat_m, na.rm = TRUE)
+
+k3_lwr <- mean(data$earlyExtra, na.rm = TRUE) - sd(data$earlyExtra, na.rm = TRUE)
+k3_upr <- mean(data$earlyExtra, na.rm = TRUE) + sd(data$earlyExtra, na.rm = TRUE)
+
+k4_lwr <- mean(data$earlypi_z, na.rm = TRUE) - sd(data$earlypi_z, na.rm = TRUE)
+k4_upr <- mean(data$earlypi_z, na.rm = TRUE) + sd(data$earlypi_z, na.rm = TRUE)
+
+c2_lwr <- mean(data$earlySalience_linear, na.rm = TRUE) - sd(data$earlySalience_linear, na.rm = TRUE)
+c2_upr <- mean(data$earlySalience_linear, na.rm = TRUE) + sd(data$earlySalience_linear, na.rm = TRUE)
+
+RA6 <- lm_robust(eu_position ~ past_govt*earlySalience*earlyVolat_m +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA6, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlyVolat_m" = c(k2_lwr, k2_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k2_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k2_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k2_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k2_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "",
+       title = "Figure A13: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = A6") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA6, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat_m" = c(k2_lwr, k2_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat_m == k2_lwr ~ paste("Early volatility =", 
+                                                               round(k2_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat_m == k2_upr ~ paste("Early volatility =", round(k2_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 5.66 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A14: Predicted EU Position",
+       subtitle = "Model = A6") +
+  theme(legend.position = "bottom")
+
+RA12 <- lm_robust(eu_position ~ past_govt*earlySalience*earlyExtra +
+           lrecon + lr_squared + 
+           vote + enp_votes +
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA12, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlyExtra" = c(k3_lwr, k3_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Extra-System Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k3_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k3_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Extra-System Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k3_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k3_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "",
+       title = "Figure A15: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = A12") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA12, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyExtra" = c(k3_lwr, k3_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Extra-System Volatility` = case_when(earlyExtra == k3_lwr ~ paste("Early Extra-System Volatility =", 
+                                                               round(k3_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyExtra == k3_upr ~ paste("Early Extra-System Volatility =", round(k3_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early Extra-System Volatility = -4.94 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Extra-System Volatility`) +
+  labs(title = "Figure A16: Predicted EU Position",
+       subtitle = "Model = A12") +
+  theme(legend.position = "bottom")
+
+RA18 <- lm_robust(eu_position ~ past_govt*earlySalience*earlypi_z +
+           lrecon + lr_squared + 
+           vote + enp_votes + 
+           log_gdp + log_pop + 
+           net_exports + govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA18, 
+            variables = "past_govt",
+            condition = list("earlySalience",
+                             "earlypi_z" = c(k4_lwr, k4_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Party Institutionalization",
+                     palette = "Dark2",
+                     labels = c(paste(round(k4_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k4_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Party Institutionalization",
+                     palette = "Dark2",
+                     labels = c(paste(round(k4_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k4_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "",
+       title = "Figure A17: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = A18") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA18, 
+                 condition = list("past_govt",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlypi_z" = c(k4_lwr, k4_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Party Institutionalization` = case_when(earlypi_z == k4_lwr ~ paste("Early Party Institutionalization =", 
+                                                               round(k4_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlypi_z == k4_upr ~ paste("Early Party Institutionalization =", round(k4_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early Party Institutionalization = 0.58 \n(1 SD above the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Party Institutionalization`) +
+  labs(title = "Figure A18: Predicted EU Position",
+       subtitle = "Model = A18") +
+  theme(legend.position = "bottom")
+
+RA25 <- lm_robust(eu_position ~ past_govt*earlySalience_linear*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA25, 
+            variables = "past_govt",
+            condition = list("earlySalience_linear",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience (linear)", 
+       y = "",
+       title = "Figure A19: Marginal Effect of Past Government Participation on EU Position",
+       subtitle = "Model = A25") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA25, 
+                 condition = list("past_govt",
+                                  "earlySalience_linear" = c(c2_lwr, c2_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 draw = FALSE) |>
+  mutate(
+    Party = case_when(past_govt == 1 ~ "Dominant",
+                           past_govt == 0 ~ "Challenger"),
+    `Early Salience (linear)` = case_when(earlySalience_linear == c2_lwr ~ paste(round(c2_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlySalience_linear == c2_upr ~ paste(round(c2_upr, 2),
+                                                 "\n(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early Volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early Volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early Volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Salience (linear)`,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = Party)) +
+  geom_pointrange(position = position_dodge(width = 0.2)) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A20: Predicted EU Position",
+       subtitle = "Model = A25") +
+  theme(legend.position = "bottom")
+
+```
+
+DV: CHES EU position  
+IVs: Continuous Past Government Experience * Early Salience * Early Volatility
+
+```{r, results = TRUE}
+
+A26 <- lm(eu_position ~ govt_duration +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A27 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A28 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A29 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop +
+           Year + Family,
+           data = data)
+
+A30 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           Year + Family,
+           data = data)
+
+A31 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt +
+           Year + Family,
+           data = data)
+
+A32 <- lm(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A26, A27, A28, A29, A30, A31, A32,
+          se = estimatr::starprep(A26, A27, A28, A29, A30, A31, A32),
+          type = "html",
+          title = "Table A11: Robustness check with continuous government experience",
+           covariate.labels = c("Past Govt Experience (Years)",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.caption  = "CHES EU Position",
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA11.html")
+```
+
+```{r}
+
+g_lwr <- mean(data$govt_duration, na.rm = TRUE) - sd(data$govt_duration, na.rm = TRUE)
+g_upr <- mean(data$govt_duration, na.rm = TRUE) + sd(data$govt_duration, na.rm = TRUE)
+
+RA32 <- lm_robust(eu_position ~ govt_duration*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA32, 
+            variables = "govt_duration",
+            condition = list("earlySalience",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "Marginal Effect",
+       title = "Figure A21: Marginal Effect of Past Government Experience (Years) \non EU Position",
+       subtitle = "Model = A32") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA32, 
+                 condition = list("govt_duration",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 rug = TRUE,
+                 draw = FALSE) |>
+  mutate(
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = govt_duration,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = `Early Salience`,
+             fill = `Early Salience`)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.2, colour = NA) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A22: Predicted EU Position",
+       subtitle = "Model = A32",
+       y = "",
+       x = "Past Govt Experience (Years)") +
+  theme(legend.position = "bottom")
+
+```
+
+### Replacing Govt by Party Years in Sample
+
+DV: CHES EU position  
+IVs: Years in Sample * Early Salience * Early Volatility  
+
+```{r, results = TRUE}
+
+A33 <- lm(eu_position ~ party_age +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A34 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year,
+           data = data)
+
+A35 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           Year + Family,
+           data = data)
+
+A36 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + 
+           Year + Family,
+           data = data)
+
+A37 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports +
+           Year + Family,
+           data = data)
+
+A38 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + 
+           Year + Family,
+           data = data)
+
+A39 <- lm(eu_position ~ party_age*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+stargazer(A33, A34, A35, A36, A37, A38, A39,
+          se = estimatr::starprep(A33, A34, A35, A36, A37, A38, A39),
+          type = "html",
+          title = "Table A12: Robustness check with Party Years in Sample",
+           covariate.labels = c("Party Years in Sample",
+                               "Early Salience",
+                               "Early Volatility",
+                               "Economic Left-Right",
+                               "Economic Left-Right Squared",
+                               "Vote share",
+                               "Effective Number of Parties",
+                               "Log GDP",
+                               "Log Population",
+                               "Net Exports",
+                               "Current Govt Participation",
+                               "Gal-Tan",
+                               "Past Govt:Early Salience",
+                               "Past Govt:Early Volatility",
+                               "Early Salience:Early Volatility",
+                               "Past Govt:Early Salience:Early Volatility"),
+          dep.var.caption  = "CHES EU Position",
+          dep.var.labels.include = FALSE,
+          object.names = TRUE,
+          model.numbers = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit = c("Family", "Year"),
+          omit.labels = c("Family", "Year"),
+          omit.stat = c("f", "ser"),
+          out = "TableA12.html")
+```
+
+```{r}
+
+a_lwr <- mean(data$party_age, na.rm = TRUE) - sd(data$party_age, na.rm = TRUE)
+a_upr <- mean(data$party_age, na.rm = TRUE) + sd(data$party_age, na.rm = TRUE)
+
+RA39 <- lm_robust(eu_position ~ party_age*earlySalience*earlyVolat +
+            lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+plot_slopes(RA39, 
+            variables = "party_age",
+            condition = list("earlySalience",
+                             "earlyVolat" = c(k_lwr, k_upr)),
+            rug = TRUE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  scale_fill_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c(paste(round(k_lwr, 2), "(1 SD below the mean)"), 
+                                paste(round(k_upr, 2), "(1 SD above the mean)"))) +
+  labs(x = "Early Salience", 
+       y = "Marginal Effect",
+       title = "Figure A23: Marginal Effect of Party Age on EU Position",
+       subtitle = "Model = A39") +
+  theme(legend.position = "bottom")
+
+plot_predictions(RA39, 
+                 condition = list("party_age",
+                                  "earlySalience" = c(c_lwr, c_upr),
+                                  "earlyVolat" = c(k_lwr, k_upr)),
+                 rug = TRUE,
+                 draw = FALSE) |>
+  mutate(
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = party_age,
+             y = estimate,
+             ymin = conf.low, ymax = conf.high,
+             colour = `Early Salience`,
+             fill = `Early Salience`)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.1, colour = NA) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_wrap(~ `Early Volatility`) +
+  labs(title = "Figure A24: Predicted EU Position",
+       subtitle = "Model = A39",
+       y = "",
+       x = "Party Years in Sample") +
+  theme(legend.position = "bottom")
+
+```
+
+### Checking Intervals
+
+Consider again the general model equation: $$eu_{i,t, c} = \beta_0 + \beta_1pg_{i,t,c} + \beta_2\,es_c+\beta_3\,ev_c + \beta_4\;pg_{i, t, c}*es_c+\beta_5\;pg_{i, t, c}*ev_c+\beta_6\;es_c*ev_c +\beta_7\;pg_{i, t, c}*es_c*ev_c + \mathbf{BX} + u_{i, t, c}$$  
+
+This expression can be rewritten as $eu_{i,t, c} = \beta_0 + pg_{i,t,c}(\beta_1 + \beta_4\;es_c+\beta_5\;ev_c+\beta_7\;es_c*ev_c ) + \beta_2\,es_c+\beta_3\,ev_c+\beta_6\;es_c*ev_c + \mathbf{BX} + u_{i, t, c}$.
+
+The marginal effect of `past_govt` is $\beta_1 + \beta_4\;es_c+\beta_5\;ev_c+\beta_7\;es_c*ev_c$, which is the dominant-challenger gap and varies as a function of `earlySalience` and `earlyVolatility`. With 2 values for each, the model can be defined by 4 points, corresponding to all combinations of both. Consider again M8:
+
+```{r}
+
+R8 <- lm_robust(eu_position ~ past_govt*earlySalience*earlyVolat +
+           lrecon + lr_squared + 
+           vote + enp_votes + log_gdp +
+           log_pop + net_exports + 
+           govt + galtan +
+           Year + Family,
+           data = data)
+
+slopes(
+  R8,
+  variables = "past_govt",
+  newdata = datagrid(
+    earlySalience = c(c_lwr, c_upr),
+    earlyVolat = c(k_lwr, k_upr)
+    )) |> 
+  mutate(
+    `Early Salience` = case_when(earlySalience == c_lwr ~ paste(round(c_lwr, 2),
+                                                 "(1 SD below the mean)"),
+                           earlySalience == c_upr ~ paste(round(c_upr, 2),
+                                                 "(1 SD above the mean)")),
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Volatility`, y = estimate, 
+             ymin = conf.low, ymax = conf.high,
+             colour = `Early Salience`
+             )) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(position = position_dodge(width = 0.1)) +
+  labs(y = "Marginal Effect",
+       x = "",
+       title = "Figure A25: Maginal Effect of Past Govt Participation (Challenger-Dominant Gap)") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "bottom")
+
+```
+
+We can write the marginal effect of `earlySalience` on the dominant-challenger gap (i.e., on the marginal effect of `past_govt`) as $\beta_4+\beta_7\;ev_c$. Its variance is $Var(\beta_4) + ev_c^2*Var(\beta_7) + 2*ev_c*Cov(\beta_4, \beta_7)$.
+
+```{r}
+
+data.frame(
+  earlyVolat = c(k_lwr, k_upr),
+  estimate = c(R8$coefficients[49] + R8$coefficients[52]*k_lwr,
+               R8$coefficients[49] + R8$coefficients[52]*k_upr),
+  se = c(sqrt(vcov(R8)[49, 49] + 
+                k_lwr^2 * vcov(R8)[52, 52] + 
+                2 * k_lwr * vcov(R8)[49, 52]),
+         sqrt(vcov(R8)[49, 49] + 
+                k_upr^2 * vcov(R8)[52, 52] + 
+                2 * k_upr * vcov(R8)[49, 52]))) |>
+  mutate(
+    `Early Volatility` = case_when(earlyVolat == k_lwr ~ paste("Early volatility =", 
+                                                               round(k_lwr, 2),
+                                                 "\n(1 SD below the mean)"),
+                           earlyVolat == k_upr ~ paste("Early volatility =", round(k_upr, 2),
+                                                 "\n(1 SD above the mean)")) |>
+      as.factor() |>
+      relevel("Early volatility = 6.41 \n(1 SD below the mean)")
+    ) |> 
+  ggplot(aes(x = `Early Volatility`, y = estimate,
+             ymin = estimate - 1.96*se,
+             ymax = estimate + 1.96*se)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Figure A26: Marginal Effect of Early Salience on Challenger-Dominant Gap",
+       x = "",
+       y = "Marginal Effect")
+
+```
+
+The above results rely on `earlySalience` and `earlyVolatility` computed based on salience and volatility in the ten-year interval after the first election. How would these results vary by time horizon (i.e., how these marginal effects of early salience change as more or less years after the first election are considered)?
+
+```{r}
+## Creating a function that, for a given data set and horizon x, returns a tibble 
+##  with the corresponding measures of early salience and early volatility
+
+get_data <- function(d, x){
+  tibble(horizon = x,
+         countryname = as.character(d$countryname),
+         earlySalience = median(d$log_eu_salience[d$time <= x & 
+                                         d$time >= 0],na.rm = TRUE),
+         earlyVolat = median(d$tev[d$time <= x & 
+                                        d$time >= 0], na.rm = TRUE)) |>
+    distinct()
+  
+}
+
+## Creating a function that maps the get_data function between 5 and 15, such that 
+##  for a given dataset we can get 10 tibbles with corresponding early salience and 
+##  volatility measures at each horizon.
+
+get_data_mapped <- function(d) {
+  4:20 |>
+  map(~ get_data(x = ., d = d))
+}
+
+## Going back to the merged CMP-Volatility data, splitting by country, and mapping the 
+##  functions created above. The resulting tibbles (20 per country) are bound and joined 
+##  with the rest of the data set by the countryname
+
+
+df <- full_join(cmp, 
+            volat, 
+            by = c("year", "electionyear", "countryname")) |>
+  mutate(country = paste(countryname, "1", sep = "")) |>
+  group_split(country) |>
+  map_dfr( ~ get_data_mapped(.)) |>
+  bind_rows() |>
+  right_join(data |>
+               dplyr::select(-c(earlySalience, earlyVolat)))
+
+#nrow(df)/nrow(data) ## We now get a dataframe with 11 times as many rows as before, 
+                    ##  since each prior observation now has 10 new values for 
+                    ##  early salience and volatility
+
+## Now creating a function that for every horizon and dataframe returns
+##  a dataframe with the horizon and the estimate and CIs for each horizon and
+##  level of early volatility (here set, as before, as a SD above and below the mean). 
+
+## Per country, each horizon corresponds to a value of early salience and to a value of 
+##  early volatility. With these, we can have a regression, specified identically to the 
+##  M7, which yields two point estimates and corresponding CIs for the marginal effect of
+##  early salience on the dominant-challenger gap (for a low/high value of early volatility)
+
+get_MEs <- function(x, data) {
+  data_1 <- data |>
+    filter(horizon == x)
+  k_lwr <- mean(data_1$earlyVolat, na.rm = TRUE) -
+    sd(data_1$earlyVolat, na.rm = TRUE)
+  k_upr <- mean(data_1$earlyVolat, na.rm = TRUE) +
+    sd(data_1$earlyVolat, na.rm = TRUE)
+  
+  model <- lm_robust(eu_position ~ past_govt*earlySalience*earlyVolat +
+                lrecon + lr_squared + 
+                vote + enp_votes + log_gdp +
+                log_pop + net_exports + 
+                govt + galtan +
+                Year + Family,
+           data = data_1)
+  
+  data.frame(
+    earlyVolat = c(k_lwr, k_upr),
+    estimate = c(
+      model$coefficients[49] + model$coefficients[52] * k_lwr,
+      model$coefficients[49] + model$coefficients[52] * k_upr
+    ),
+    se = c(
+      sqrt(vcov(model)[49, 49] +
+             k_lwr ^ 2 * vcov(model)[52, 52] +
+             2 * k_lwr * vcov(model)[49, 50]),
+      sqrt(vcov(model)[49, 49] +
+             k_upr ^ 2 * vcov(model)[52, 52] +
+             2 * k_upr * vcov(model)[49, 52])
+    )
+  ) |>
+    mutate(
+      horizon = x,
+      early_Volat = case_when(
+        earlyVolat < mean(earlyVolat, na.rm = TRUE) ~ "Low",
+        earlyVolat > mean(earlyVolat, na.rm = TRUE) ~ "High",
+      ) |>
+        as.factor() |>
+        relevel("Low")
+    ) |>
+    dplyr::select(horizon, estimate, se, earlyVolat, early_Volat)
+  
+}
+
+## Mapping this over the 5:15 range and the df created above
+
+4:20 |>
+  map_dfr(~ get_MEs(., df)) |>
+  ggplot(aes(x = horizon, y = estimate, 
+             ymin = estimate - 1.96*se, 
+             ymax = estimate + 1.96*se,
+             colour = early_Volat)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_pointrange(position = position_dodge(width = 0.5)) +
+  #gghighlight::gghighlight((estimate - 1.96*se)*(estimate + 1.96*se) > 0) +
+  scale_color_brewer(name = "Early Volatility",
+                     palette = "Dark2",
+                     labels = c("Low (1 SD below the mean)", 
+                                "High (1 SD below the mean)")) +
+  labs(title = "Figure A27: Marginal Effect of Early Salience on Challenger-Dominant Gap",
+       y = "Marginal Effect",
+       x = "Year Horizon") +
+    scale_x_continuous(labels = scales::label_number(accuracy = 1)) +
+  theme(legend.position = "bottom")
+
+```
+
+This validates the use of the 10-year mark.
+
+## Regression Diagnostics
+
+```{r}
+
+check_heteroscedasticity(M8) 
+  ## We reject the null of homoscedastic errors. 
+  ## This validates the heteroscedasticity-robust SEs employed.
+
+performance::check_model(M8, 
+                         check = c("normality", "qq", 
+                                   "linearity", "outliers"))
+  ## Residuals are linear and approach normality, albeit a little
+  ## skewed. There are no influential observations.
+
+```
+
+## Portugal Chapter
+
+```{r}
+
+## Results from the 2024 elections not yet included in ParlGov
+election24 <- data.frame(electionyear = c(rep(2024, 8)),
+                         vote_share = c(28.84, 28.00, 18.07,
+                                        4.94, 4.36, 3.17, 3.16,
+                                        1.95),
+                         party_name_short = c("PSD/AD", "PS", "CH",
+                                              "IL", "BE", "PCP",
+                                              "L", "PAN"))
+parlgov |> 
+  filter(countryname == "Portugal") |> 
+  mutate(
+  party_name_short = case_when(
+    party_name_short %in% c("APU", "CDU", "PCP", "PEV") ~ "PCP",
+    party_name_short %in% c("PSD", "AD") ~ "PSD/AD",
+    party_name_short %in% c("UDP") ~ "UDP",
+    party_name_short %in% c("BE") ~ "BE",
+    party_name_short == "CDS-PP" ~ "CDS-PP",
+    party_name_short == "PS" ~ "PS",
+    party_name_short == "PRD" ~ "PRD",
+    party_name_short == "PAN" ~ "PAN",
+    party_name_short == "L" ~ "L",
+    party_name_short == "IL" ~ "IL",
+    party_name_short == "CH" ~ "CH",
+    #party_name_short %in% c("MDP", "FSP", "MES", "UEDS",
+    #                        "POUS", "PCTP/MRPP") ~ "Other Left",
+    #party_name_short %in% c("Ref", "ASDI", "PSN", "PDR") ~ "Other Centre",
+    #party_name_short %in% c("PPM", "PDC", "A") ~ "Other Right",
+    #party_name_short %in% c("MDP", "FSP", "MES", "UEDS",
+    #                        "POUS", "PCTP/MRPP", "Ref", 
+    #                        "ASDI", "PSN", "PDR", "PPM", 
+    #                        "PDC", "A") ~ "Other",
+    .default = NA
+  )
+) |> 
+  dplyr::select(electionyear, vote_share, party_name_short) |> 
+  bind_rows(election24) |> 
+  group_by(electionyear) |> 
+  mutate(
+  party_name_short = case_when(
+    party_name_short == "PCP" & is.na(vote_share) ~ NA,
+    party_name_short == "PSD/AD" &
+      is.na(vote_share) ~ NA,
+    party_name_short == "UDP/BE" &
+      is.na(vote_share) ~ NA,
+    .default = party_name_short
+  )
+) |> 
+  ungroup() |>
+  group_by(electionyear, party_name_short) |>
+  mutate(vote_share = sum(vote_share)) |>
+  filter(!is.na(party_name_short)) |> 
+  ungroup() |>
+  group_by(party_name_short) |>
+  mutate(
+    last = max(electionyear, na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  ggplot(
+    aes(
+      x = electionyear,
+      y = vote_share,
+      colour = party_name_short,
+      group = party_name_short
+    )
+  ) + 
+  geom_point() + 
+  geom_line() + 
+  xlim(1974, 2026) +
+  ggrepel::geom_text_repel(aes(label = ifelse(electionyear == last,
+                               party_name_short, "")),
+            size = 2.5,
+            nudge_x = 0.5,
+            hjust = 0,
+            min.segment.length = Inf
+            ) +
+  scale_colour_manual(
+    values = c(
+      "PCP" = "red3",
+      "BE" = "red",
+      "UDP" = "red",
+      "PSD/AD" = "orange1",
+      "CDS-PP" = "steelblue1",
+      "PS" = "deeppink1",
+      "PRD" = "darkgreen",
+      "PAN" = "turquoise",
+      "L" = "green2",
+      "IL" = "gold2",
+      "CH" = "black",
+      "Other Left" = "darkred",
+      "Other Centre" = "gold2",
+      "Other Right" = "navy",
+      "Other" = "grey"
+    ), name = "") + 
+  guides(colour = "none") +
+  labs(y = "Vote share", x = "",
+       title = "Figure 8: Evolution of vote share of the main Portuguese parties (1975-2024)")
+
+```
+
+## Poland Chapter
+
+
+```{r}
+
+#### Figure 10 ####
+
+election23 <- data.frame(electionyear = c(rep(2023, 5)),
+                         vote_share = c(35.4, 30.7, 8.6, 14.4,
+                                        7.2),
+                         party_name_short = c("PiS", "PO/KO", "SLD/LiD",
+                                              "PSL", "KORWiN/K"),
+                         parlgov_id = c(528, 512, 629,
+                                         664, 2602))
+
+parlgov |> 
+  filter(countryname == "Poland") |> 
+  dplyr::select(electionyear, vote_share, party_name_short, parlgov_id) |> 
+  distinct() |> 
+  mutate(
+  party_name_short = case_when(
+    party_name_short %in% c("D|W|U") ~ "UD/UW",
+    party_name_short %in% c("SLD", "LiD") ~ "SLD/LiD",
+    party_name_short %in% c("ZChN") ~ "ZChN",
+    party_name_short %in% c("PSL") ~ "PSL",
+    party_name_short %in% c("KPN") ~ "KPN",
+    party_name_short %in% c("PC") ~ "PC",
+    party_name_short %in% c("KLD") ~ "KLD",
+    party_name_short %in% c("UP") ~ "UP",
+    party_name_short %in% c("BBWR") ~ "BBWR",
+    party_name_short %in% c("X") ~ "X",
+    party_name_short %in% c("SRP") ~ "SRP",
+    party_name_short %in% c("AWS") ~ "AWS",
+    party_name_short %in% c("ROP") ~ "ROP",
+    party_name_short %in% c("PO") ~ "PO/KO",
+    party_name_short %in% c("PiS") ~ "PiS",
+    party_name_short %in% c("LPR") ~ "LPR",
+    party_name_short %in% c("RP") ~ "RP",
+    party_name_short %in% c("K") ~ "Kukiz",
+    party_name_short %in% c("N") ~ "Modern",
+    party_name_short %in% c("KORWIN") ~ "KORWiN/K",
+    .default = NA
+  )
+) |> 
+  bind_rows(election23) |> 
+  mutate(
+  party_name_short = case_when(
+    party_name_short == "SLD/LiD" & is.na(vote_share) ~ NA,
+    party_name_short == "UP" & is.na(vote_share) ~ NA,
+    party_name_short == "Kukiz" & is.na(vote_share) ~ NA,
+    party_name_short == "UD/UW" & is.na(vote_share) ~ NA,
+    is.na(electionyear)  &
+      is.na(vote_share) ~ NA,
+    .default = party_name_short
+  ),
+  parlgov_id = case_when(
+    party_name_short == "SLD/LiD" ~ 629,
+    .default = parlgov_id
+  )
+) |> 
+  filter(!is.na(party_name_short)) |>
+  group_by(party_name_short) |>
+  mutate(
+    last = max(electionyear, na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  ggplot(
+    aes(
+      x = electionyear,
+      y = vote_share,
+      colour = party_name_short,
+      group = parlgov_id
+    )
+  ) + 
+  geom_point() + 
+  geom_line() + 
+  ggrepel::geom_text_repel(aes(label = ifelse(electionyear == last,
+                               party_name_short, "")),
+            size = 2
+            ) +
+  scale_colour_manual(
+    values = c(
+      "UD/UW" = "goldenrod2",
+      "SLD/LiD" = "deeppink1",
+      "ZChN" = "blue2",
+      "PSL" = "green4",
+      "KPN" = "navy",
+      "PC" = "blue3",
+      "KLD" = "goldenrod2",
+      "UP" = "tomato",
+      "BBWR" = "coral",
+      "X" = "maroon",
+      "SRP" = "purple4",
+      "AWS" = "purple1",
+      "ROP" = "steelblue4",
+      "PO/KO" = "goldenrod1",
+      "PiS" = "blue3",
+      "LPR" = "black",
+      "RP" = "orange2",
+      "Kukiz" = "black",
+      "Modern" = "green2",
+      "KORWiN/K" = "yellow3",
+      "Other" = "grey"
+    ), name = "") + 
+  guides(colour = "none") +
+  labs(y = "Vote share", x = "",
+       title = "Figure 9: Evolution of vote share of the main Polish parties (1989-2024)")
+```
+
+```{r, fig.asp = 1.1}
+
+#### Figure 10 ####
+
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+    new_x <- paste(x, within, sep = sep)
+    stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+    reg <- paste0(sep, ".+$")
+    ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+cmp |> 
+  filter(countryname == "Poland") |> 
+  dplyr::select(per108, per110, partyabbrev,
+                partyname, electionyear) |>
+  mutate(partyabbrev = case_when(
+    is.na(partyabbrev) ~ partyname, 
+    .default = partyabbrev),
+    per110 = -per110) |> 
+  pivot_longer(cols = c(per108, per110),
+               names_to = "Mentions:",
+               values_to = "values") |>
+  ggplot(aes(x = reorder_within(partyabbrev, values, electionyear), 
+             y = values,
+             fill = `Mentions:`)) + 
+  geom_col() + 
+  coord_flip() + 
+  scale_fill_manual(values = c("#377eb8", "#e41a1c"),
+                    labels = c("per108 (pro-EU)",
+                               "per110 (anti-EU)"),
+                    name = "") +
+  scale_x_reordered() +
+  facet_wrap(~ electionyear, scales = "free_y") + 
+  labs(x = "", y = "EU mentions",
+       title = "Figure 10: CMP EU Mentions",
+       caption = "Source: CMP") +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+
+#### Figure 11 ####
+
+## Markowski's data on the electorate's position on the EU by party preference
+electorate_01 <- data.frame(Party = c("SLD", "PSL", "SO", "PO", "PiS", "LPR"),
+                            Mean = c(4.75, 6.06, 6.12, 3.68, 4.97, 6.85),
+                            SD = c(3.31, 3.60, 3.10, 3.32, 3.72, 3.25),
+                            N = c(394, 79, 109, 130, 89, 63)) |>
+  mutate(
+    SE = SD/sqrt(N),
+    T = qt(p = 0.05/2, 
+           df = N-1, 
+           lower.tail = FALSE),
+    conf.low = Mean - T*SE,
+    conf.high = Mean + T*SE,
+    type = "Voters"
+  )
+
+## Markowski's data on MPs' position on the EU by party
+caucus_01 <- data.frame(Party = c("SLD", "PSL", "SO", "PO", "PiS", "LPR"),
+                            Mean = c(1.45, 4.75, 8.47, 0.90, 4.13, 9.80),
+                            SD = c(1.49, 1.38, 2.33, 1.96, 2.55, 0.61),
+                            N = c(216, 42, 53, 65, 44, 38)) |>
+  mutate(
+    SE = SD/sqrt(N),
+    T = qt(p = 0.05/2, 
+           df = N-1, 
+           lower.tail = FALSE),
+    conf.low = Mean - T*SE,
+    conf.high = Mean + T*SE,
+    type = "MPs"
+  )
+
+bind_rows(electorate_01, caucus_01) |>
+  ggplot(aes(x = reorder(Party, Mean),
+             y = Mean, 
+             ymin = conf.low,
+             ymax = conf.high,
+             colour = type)) +
+  geom_pointrange(position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  scale_colour_brewer(palette = "Dark2",
+                      direction = 1) +
+  labs(y = "EU Stance", x = "",
+       caption = "Source: Markowski in Lewis and Mansfeldová, 2007, pp. 134-5, Tables 7.4 and 7.6 \nPositive values indicate Euroscepticism",
+       colour = "",
+       title = "Figure 11: EU Positions by Polish Voters and MPs (2001)") +
+  theme(legend.position = "bottom")
+
+```
